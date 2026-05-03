@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mini Isometric City</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      background: #1d2228;
+      font-family: 'Pretendard', 'Noto Sans KR', system-ui, sans-serif;
+      color: #e8edf2;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 100vh;
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 14px;
+      border-bottom: 1px solid #3c4652;
+      background: #252c34;
+      align-items: center;
+    }
+    .group {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      padding-right: 8px;
+      border-right: 1px solid #3c4652;
+    }
+    .group:last-child { border-right: 0; }
+    button, select {
+      border: 1px solid #4a5868;
+      background: #334152;
+      color: #fff;
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button.active { background: #4d84c7; border-color: #7fb3f3; }
+    #hud { font-size: 14px; color: #bed3ea; }
+    #wrap {
+      display: grid;
+      place-items: center;
+      padding: 12px;
+    }
+    canvas {
+      background: linear-gradient(#6dbf69, #4fa25a);
+      border: 1px solid #3b6941;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0,0,0,.35);
+      max-width: 100%;
+      height: auto;
+    }
+    .hint {opacity: .85; font-size: 12px;}
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <div class="group">
+      <button id="roadMode">도로 모드</button>
+      <button id="buildingMode" class="active">건물 모드</button>
+    </div>
+    <div class="group">
+      <label for="buildingType">건물 종류</label>
+      <select id="buildingType">
+        <option value="residential">주거</option>
+        <option value="commercial">상업</option>
+        <option value="industrial">산업</option>
+      </select>
+      <button id="upgradeBtn">선택 건물 업그레이드</button>
+    </div>
+    <div class="group">
+      <span id="hud"></span>
+    </div>
+    <span class="hint">이미지 경로는 코드 하단 ASSET_PATHS를 수정해서 연결하세요.</span>
+  </div>
+
+  <div id="wrap">
+    <canvas id="game" width="1800" height="1100"></canvas>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    const TILE_W = 96;
+    const TILE_H = 48;
+    const MAP_W = 24;
+    const MAP_H = 24;
+    const HALF_W = TILE_W / 2;
+    const HALF_H = TILE_H / 2;
+
+    const MODES = { ROAD: 'road', BUILDING: 'building' };
+    let mode = MODES.BUILDING;
+
+    const ROAD = 'road';
+    const EMPTY = 'empty';
+
+    // 사용자 이미지 연결 지점
+    // 각 배열 인덱스: [1단계, 2단계, 3단계]
+    const ASSET_PATHS = {
+      residential: [
+        'assets/residential_lv1.png',
+        'assets/residential_lv2.png',
+        'assets/residential_lv3.png'
+      ],
+      commercial: [
+        'assets/commercial_lv1.png',
+        'assets/commercial_lv2.png',
+        'assets/commercial_lv3.png'
+      ],
+      industrial: [
+        'assets/industrial_lv1.png',
+        'assets/industrial_lv2.png',
+        'assets/industrial_lv3.png'
+      ]
+    };
+
+    const images = {};
+    function loadImages() {
+      for (const [type, arr] of Object.entries(ASSET_PATHS)) {
+        images[type] = arr.map(src => {
+          const img = new Image();
+          img.src = src;
+          return img;
+        });
+      }
+    }
+    loadImages();
+
+    const map = Array.from({ length: MAP_H }, () =>
+      Array.from({ length: MAP_W }, () => ({
+        type: EMPTY,
+        buildingType: null,
+        level: 0,
+        traffic: 0,
+        pollution: 0,
+        economy: 0
+      }))
+    );
+
+    const originX = canvas.width / 2;
+    const originY = 120;
+
+    let selected = null;
+
+    const roadBtn = document.getElementById('roadMode');
+    const buildingBtn = document.getElementById('buildingMode');
+    const buildingTypeSelect = document.getElementById('buildingType');
+    const upgradeBtn = document.getElementById('upgradeBtn');
+    const hud = document.getElementById('hud');
+
+    roadBtn.onclick = () => { mode = MODES.ROAD; roadBtn.classList.add('active'); buildingBtn.classList.remove('active'); };
+    buildingBtn.onclick = () => { mode = MODES.BUILDING; buildingBtn.classList.add('active'); roadBtn.classList.remove('active'); };
+
+    upgradeBtn.onclick = () => {
+      if (!selected) return;
+      const t = map[selected.r][selected.c];
+      if ((t.buildingType === 'residential' || t.buildingType === 'commercial') && t.level < 3) {
+        t.level += 1;
+      }
+      recalcSystems();
+      draw();
+    };
+
+    function isoToScreen(c, r) {
+      return {
+        x: originX + (c - r) * HALF_W,
+        y: originY + (c + r) * HALF_H
+      };
+    }
+
+    function screenToIso(mx, my) {
+      const dx = mx - originX;
+      const dy = my - originY;
+      const c = Math.floor((dy / HALF_H + dx / HALF_W) / 2);
+      const r = Math.floor((dy / HALF_H - dx / HALF_W) / 2);
+      return { c, r };
+    }
+
+    function inMap(c, r) {
+      return c >= 0 && r >= 0 && c < MAP_W && r < MAP_H;
+    }
+
+    function pointInDiamond(px, py, cx, cy) {
+      const dx = Math.abs(px - cx);
+      const dy = Math.abs(py - cy);
+      return dx / HALF_W + dy / HALF_H <= 1;
+    }
+
+    function handleClick(e) {
+      const rect = canvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+
+      const guess = screenToIso(mx, my);
+      if (!inMap(guess.c, guess.r)) return;
+
+      const center = isoToScreen(guess.c, guess.r);
+      if (!pointInDiamond(mx, my, center.x, center.y)) return;
+
+      selected = { c: guess.c, r: guess.r };
+      const tile = map[guess.r][guess.c];
+
+      if (mode === MODES.ROAD) {
+        tile.type = ROAD;
+        tile.buildingType = null;
+        tile.level = 0;
+      } else {
+        tile.type = 'building';
+        tile.buildingType = buildingTypeSelect.value;
+        tile.level = Math.max(1, tile.level || 1);
+      }
+
+      recalcSystems();
+      draw();
+    }
+
+    function recalcSystems() {
+      let res = 0, com = 0, ind = 0, roads = 0;
+      for (let r = 0; r < MAP_H; r++) {
+        for (let c = 0; c < MAP_W; c++) {
+          const t = map[r][c];
+          t.traffic = 0;
+          t.pollution = 0;
+          t.economy = 0;
+          if (t.type === ROAD) roads++;
+          if (t.type === 'building') {
+            if (t.buildingType === 'residential') res += t.level;
+            if (t.buildingType === 'commercial') com += t.level;
+            if (t.buildingType === 'industrial') ind += t.level;
+          }
+        }
+      }
+
+      // 단순 기본 시스템
+      const economy = com * 2 + ind * 3 - res;
+      const pollution = ind * 4 + roads * 0.2;
+      const traffic = roads > 0 ? Math.max(0, (res + com + ind) - roads * 1.5) : (res + com + ind);
+
+      hud.textContent = `주거:${res} / 상업:${com} / 산업:${ind} | 경제:${economy.toFixed(1)} | 공해:${pollution.toFixed(1)} | 교통:${traffic.toFixed(1)}`;
+    }
+
+    function drawTileDiamond(x, y, fill, stroke = 'rgba(0,0,0,0.25)') {
+      ctx.beginPath();
+      ctx.moveTo(x, y - HALF_H);
+      ctx.lineTo(x + HALF_W, y);
+      ctx.lineTo(x, y + HALF_H);
+      ctx.lineTo(x - HALF_W, y);
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.strokeStyle = stroke;
+      ctx.stroke();
+    }
+
+    function drawBuildingFallback(type, level, x, y) {
+      const colors = {
+        residential: ['#5db5ff', '#2f8fff', '#176ad6'],
+        commercial: ['#f2d36d', '#f0b93b', '#cf8b19'],
+        industrial: ['#b59adf', '#8e6fc3', '#6e4fab']
+      };
+      ctx.fillStyle = colors[type][level - 1] || '#fff';
+      const w = 42 + level * 8;
+      const h = 28 + level * 16;
+      ctx.fillRect(x - w / 2, y - h - 8, w, h);
+      ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+      ctx.strokeRect(x - w / 2, y - h - 8, w, h);
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      for (let r = 0; r < MAP_H; r++) {
+        for (let c = 0; c < MAP_W; c++) {
+          const p = isoToScreen(c, r);
+          const tile = map[r][c];
+          let color = '#58aa5f';
+          if (tile.type === ROAD) color = '#8a8e95';
+          drawTileDiamond(p.x, p.y, color);
+
+          if (tile.type === 'building' && tile.level > 0 && tile.buildingType) {
+            const img = images[tile.buildingType]?.[tile.level - 1];
+            if (img && img.complete && img.naturalWidth > 0) {
+              const scale = 0.55 + tile.level * 0.15;
+              const w = img.naturalWidth * scale;
+              const h = img.naturalHeight * scale;
+              ctx.drawImage(img, p.x - w / 2, p.y - h - 10, w, h);
+            } else {
+              drawBuildingFallback(tile.buildingType, tile.level, p.x, p.y);
+            }
+          }
+
+          if (selected && selected.c === c && selected.r === r) {
+            drawTileDiamond(p.x, p.y, 'rgba(255,255,255,0.03)', '#ffec77');
+          }
+        }
+      }
+    }
+
+    canvas.addEventListener('click', handleClick);
+
+    recalcSystems();
+    draw();
+  </script>
+</body>
+</html>
